@@ -17,16 +17,37 @@ class Step4Preview extends Component
         $this->document = $document;
     }
 
-    public function downloadResume(): StreamedResponse
+    // public function downloadResume(): StreamedResponse
+    // {
+    //     $data = $this->document->extracted_data;
+
+    //     // Optional: format for the view
+    //     $pdf = Pdf::loadView('pdf.resume', ['data' => $data]);
+
+    //     return response()->streamDownload(function () use ($pdf) {
+    //         echo $pdf->stream();
+    //     }, 'resume.pdf');
+    // }
+
+    public function downloadResume(string $template = 'modern'): StreamedResponse
     {
         $data = $this->document->extracted_data;
 
-        // Optional: format for the view
-        $pdf = Pdf::loadView('pdf.resume', ['data' => $data]);
+        // Load different views based on template
+        $view = match($template) {
+            'modern' => 'pdf.resume-modern',
+            'creative' => 'pdf.resume-creative',
+            'minimalist' => 'pdf.resume-minimalist',
+            'docx' => 'pdf.resume-docx',
+            'text' => 'pdf.resume-text',
+            default => 'pdf.resume'
+        };
+
+        $pdf = Pdf::loadView($view, ['data' => $data]);
 
         return response()->streamDownload(function () use ($pdf) {
             echo $pdf->stream();
-        }, 'resume.pdf');
+        }, 'resume-'.$template.'.pdf');
     }
 
     public function render()

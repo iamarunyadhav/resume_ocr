@@ -15,9 +15,11 @@ class Step1Upload extends Component
     public $file;
     public $context = 'resume'; // default
     public $success = false;
+    public $uploading = false;
 
     public function save()
     {
+        $this->uploading = true;
         $this->validate([
             'file' => 'required|file|mimes:pdf,docx',
         ]);

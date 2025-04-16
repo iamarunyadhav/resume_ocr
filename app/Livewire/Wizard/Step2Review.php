@@ -10,19 +10,21 @@ class Step2Review extends Component
 {
     public Document $document;
     public array $fields = [];
+    public $processing = false;
 
     public function mount(Document $document, DocumentExtractor $extractor)
     {
-        $this->document = $document;
-        // dd("csc",$this->document);
-
-        if (empty($document->extracted_data)) {
-            // Run OCR + AI once
-            $extractor->process($document);
-            $document->refresh(); // reload updated data
+        $this->processing = true;
+        try {
+            $this->document = $document;
+            if (empty($document->extracted_data)) {
+                $extractor->process($document);
+                $document->refresh();
+            }
+            $this->fields = $document->extracted_data ?? [];
+        } finally {
+            $this->processing = false;
         }
-
-        $this->fields = $document->extracted_data ?? [];
     }
 
     public function save()
