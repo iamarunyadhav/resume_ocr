@@ -12,6 +12,7 @@ class DeepSeekService implements AIServiceInterface
     {
         // dd("scsc",$rawText);
         $prompt = PromptBuilder::defaultPrompt($rawText);
+        // dd("promt",$prompt);
         return $this->sendPrompt($prompt);
     }
 
@@ -60,31 +61,7 @@ class DeepSeekService implements AIServiceInterface
 
     public function sendPrompt(string $resumeText): array
     {
-        $deepSeekApiKey = 'sk-3d4f939b321d414abada60d9608f2e90'; // Move to config!
-
-        $systemPrompt = <<<PROMPT
-        Extract resume fields as STRICT JSON. Follow this schema:
-        {
-          "name": "",
-          "email": "",
-          "phone": "",
-          "summary": "",
-          "skills": [],
-          "experience": [{
-            "company": "",
-            "role": "",
-            "years": "",
-            "achievements": []
-          }],
-          "education": [{
-            "degree": "",
-            "university": "",
-            "year": ""
-          }],
-          "certifications": [],
-          "languages": []
-        }
-        PROMPT;
+        $deepSeekApiKey = env('DEEPSEEK_API_KEY');
 
         $response = Http::withToken($deepSeekApiKey)
             ->timeout(30)
@@ -92,7 +69,7 @@ class DeepSeekService implements AIServiceInterface
                 'model' => 'deepseek-chat',
                 'response_format' => ['type' => 'json_object'], // Force JSON
                 'messages' => [
-                    ['role' => 'system', 'content' => $systemPrompt],
+                    ['role' => 'system', 'content' => PromptBuilder::get()],
                     ['role' => 'user', 'content' => $resumeText]
                 ],
             ]);

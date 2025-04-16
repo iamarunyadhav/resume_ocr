@@ -13,5 +13,33 @@ class PromptBuilder
     {
         return "Extract key-value fields for '$context' from this document text in JSON format:\n\n" . $text;
     }
+
+
+    public static function get(): string
+    {
+        return <<<PROMPT
+        Extract resume fields as STRICT JSON. Follow this schema:
+        {
+          "name": "",
+          "email": "",
+          "phone": "",
+          "summary": "",
+          "skills": [],
+          "experience": [{
+            "company": "",
+            "role": "",
+            "years": "",
+            "achievements": []
+          }],
+          "education": [{
+            "degree": "",
+            "university": "",
+            "year": ""
+          }],
+          "certifications": [],
+          "languages": []
+        }
+        PROMPT;
+    }
 }
 ?>
