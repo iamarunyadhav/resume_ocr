@@ -7,6 +7,7 @@ use App\Services\OCR\OCRServiceInterface;
 use App\Services\AI\PromptBuilder;
 use Exception;
 use Illuminate\Support\Str;
+use Illuminate\Http\Client\ConnectionException;
 
 class DeepSeekService implements AIServiceInterface
 {
@@ -17,6 +18,11 @@ class DeepSeekService implements AIServiceInterface
 
         try {
             $structuredResponse = $this->tryStructuredExtraction($cleanText);
+
+            // Ensure we have at least a name field
+            if (!isset($structuredResponse['name'])) {
+                $structuredResponse['name'] = $this->safeExtractName($cleanText);
+            }
 
             if ($this->isIncompleteResponse($structuredResponse)) {
                 $unstructuredResponse = $this->tryUnstructuredExtraction($cleanText);
@@ -73,8 +79,8 @@ class DeepSeekService implements AIServiceInterface
                     ->post('https://api.deepseek.com/v1/chat/completions', [
                         'model' => 'deepseek-chat',
                         'response_format' => ['type' => 'json_object'],
-                        'temperature' => 0.7, // Control randomness
-                        'max_tokens' => 4000, // Limit response size
+                        'temperature' => 0.7,
+                        'max_tokens' => 4000,
                         'messages' => [
                             [
                                 'role' => 'system',
@@ -100,11 +106,11 @@ class DeepSeekService implements AIServiceInterface
 
                 return $processedContent;
 
-            } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            } catch (ConnectionException $e) {
                 $lastError = $e;
                 if ($attempt < $maxRetries) {
-                    usleep($retryDelay * 1000); // Convert to microseconds
-                    $retryDelay *= 2; // Exponential backoff
+                    usleep($retryDelay * 1000);
+                    $retryDelay *= 2;
                     continue;
                 }
             } catch (\Exception $e) {
@@ -115,37 +121,35 @@ class DeepSeekService implements AIServiceInterface
 
         throw new Exception(
             "Failed after {$maxRetries} attempts. Last error: " .
-            $lastError?->getMessage() ?? 'Unknown error'
+            ($lastError ? $lastError->getMessage() : 'Unknown error')
         );
     }
 
     protected function processApiResponse(string $responseContent): array
     {
-        // Attempt to repair JSON if needed
         $jsonResponse = $this->attemptJsonRepair($responseContent);
 
-        // Validate JSON structure
-        $data = json_decode($jsonResponse, true, 512, JSON_THROW_ON_ERROR);
+        try {
+            $data = json_decode($jsonResponse, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new Exception("Failed to decode JSON: " . $e->getMessage());
+        }
 
-        // Clean and normalize the data
         return $this->cleanAndNormalizeData($data);
     }
 
     protected function attemptJsonRepair(string $json): string
     {
-        // First try simple fixes
-        $repaired = preg_replace('/,\s*([}\]])/', '$1', $json); // Remove trailing commas
-        $repaired = preg_replace('/([{,])(\s*)([}\]])/', '$1null$3', $repaired); // Fix empty elements
+        $repaired = preg_replace('/,\s*([}\]])/', '$1', $json);
+        $repaired = preg_replace('/([{,])(\s*)([}\]])/', '$1null$3', $repaired);
 
         if (json_validate($repaired)) {
             return $repaired;
         }
 
-        // If still invalid, try more aggressive repair
         $repaired = mb_convert_encoding($repaired, 'UTF-8', 'UTF-8');
-        $repaired = preg_replace('/[^\x20-\x7E\xA0-\xFF]/u', ' ', $repaired);
+        $repaired = preg_replace('/[^\x20-\x7E\xA0-\xFF\p{L}\p{N}\p{P}\p{S}]/u', ' ', $repaired);
 
-        // Final validation
         if (!json_validate($repaired)) {
             throw new Exception("Unable to repair malformed JSON response");
         }
@@ -179,46 +183,18 @@ class DeepSeekService implements AIServiceInterface
 
     protected function normalizeValue(string $value): string
     {
-        // Convert to UTF-8 and remove invalid sequences
         $value = mb_convert_encoding($value, 'UTF-8', 'UTF-8');
-
-        // Normalize whitespace and trim
         $value = preg_replace('/\s+/', ' ', $value);
         $value = trim($value);
-
-        // Remove control characters except basic whitespace
         return preg_replace('/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/', '', $value);
     }
 
     protected function sanitizeText(string $text): string
     {
-        // Remove invalid UTF-8 characters
         $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
-
-        // Remove special characters that might break JSON
         $text = preg_replace('/[^\x20-\x7E\xA0-\xFF]/u', ' ', $text);
-
-        // Normalize line endings and trim
         $text = str_replace(["\r\n", "\r"], "\n", $text);
         return trim($text);
-    }
-
-    protected function fixJsonEncoding(string $json): string
-    {
-        // Fix common JSON encoding issues
-        $json = preg_replace('/,\s*([}\]])/', '$1', $json); // Remove trailing commas
-        $json = preg_replace('/([{\[,])\s*([}\]])/', '$1null$2', $json); // Fix empty values
-        return $json;
-    }
-
-    protected function cleanArray(array $data): array
-    {
-        array_walk_recursive($data, function (&$value) {
-            if (is_string($value)) {
-                $value = $this->sanitizeText($value);
-            }
-        });
-        return $data;
     }
 
     protected function isIncompleteResponse(array $data): bool
@@ -232,40 +208,133 @@ class DeepSeekService implements AIServiceInterface
             }
         }
 
-        return $missingCount > 1; // More lenient threshold
+        return $missingCount > 1;
     }
 
     protected function mergeResponses(array $primary, array $secondary): array
     {
         foreach ($secondary as $key => $value) {
-            if (empty($primary[$key]) || (is_array($primary[$key]) && empty($primary[$key]))) {
+            if (empty($primary[$key]) || $this->isMoreComplete($value, $primary[$key])) {
                 $primary[$key] = $value;
-            } elseif (is_array($primary[$key]) && is_array($value)) {
-                $primary[$key] = array_merge($primary[$key], $value);
             }
         }
         return $primary;
     }
 
+    protected function isMoreComplete($new, $existing): bool
+    {
+        if (is_array($new) && is_array($existing)) {
+            return count($new) > count($existing);
+        }
+        return strlen((string)$new) > strlen((string)$existing);
+    }
+
     protected function basicTextExtraction(string $text): array
     {
-        // Fallback method when structured extraction fails
         return [
             'raw_text' => $text,
-            'name' => $this->extractName($text),
-            'email' => $this->extractEmail($text),
-            'phone' => $this->extractPhone($text),
-            'skills' => $this->extractSkills($text),
-            'experience' => $this->extractExperience($text),
-            'education' => $this->extractEducation($text)
+            'name' => $this->safeExtractName($text),
+            'email' => $this->safeExtractEmail($text),
+            'phone' => $this->safeExtractPhone($text),
+            'skills' => $this->safeExtractSkills($text),
+            'experience' => $this->safeExtractExperience($text),
+            'education' => $this->safeExtractEducation($text),
+            'metadata' => [
+                'status' => 'fallback',
+                'warning' => 'Used basic text extraction'
+            ]
         ];
     }
 
-    // Basic extraction helpers
-    protected function extractName(string $text): string { /* ... */ }
-    protected function extractEmail(string $text): string { /* ... */ }
-    protected function extractPhone(string $text): string { /* ... */ }
-    protected function extractSkills(string $text): array { /* ... */ }
-    protected function extractExperience(string $text): array { /* ... */ }
-    protected function extractEducation(string $text): array { /* ... */ }
+    protected function safeExtractName(string $text): string
+    {
+        try {
+            // Try to find a line that looks like a name
+            $lines = explode("\n", $text);
+            foreach ($lines as $line) {
+                $trimmed = trim($line);
+                if (preg_match('/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$/', $trimmed)) {
+                    return $trimmed;
+                }
+            }
+
+            // Fallback to email extraction
+            if (preg_match('/([a-zA-Z0-9._%+-]+)@/', $text, $matches)) {
+                $username = str_replace(['.', '_'], ' ', $matches[1]);
+                return ucwords($username);
+            }
+
+            return 'Unknown Candidate';
+        } catch (\Exception $e) {
+            return 'Unknown Candidate';
+        }
+    }
+
+    protected function safeExtractEmail(string $text): string
+    {
+        if (preg_match('/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i', $text, $matches)) {
+            return strtolower($matches[0]);
+        }
+        return '';
+    }
+
+    protected function safeExtractPhone(string $text): string
+    {
+        if (preg_match('/\+?[\d\s\-\(\)]{7,}/', $text, $matches)) {
+            return preg_replace('/[^\d\+]/', '', $matches[0]);
+        }
+        return '';
+    }
+
+    protected function safeExtractSkills(string $text): array
+    {
+        $commonSkills = ['PHP', 'JavaScript', 'Python', 'Java', 'SQL', 'HTML', 'CSS',
+                        'Laravel', 'React', 'Angular', 'Vue', 'Node.js', 'Git'];
+
+        $foundSkills = [];
+        foreach ($commonSkills as $skill) {
+            if (stripos($text, $skill) !== false) {
+                $foundSkills[] = $skill;
+            }
+        }
+
+        return array_unique($foundSkills);
+    }
+
+    protected function safeExtractExperience(string $text): array
+    {
+        $experience = [];
+        $lines = explode("\n", $text);
+
+        foreach ($lines as $line) {
+            if (preg_match('/(.*?)\s*\((.*?)\)/', $line, $matches)) {
+                $experience[] = [
+                    'role' => trim($matches[1]),
+                    'company' => '',
+                    'period' => trim($matches[2]),
+                    'description' => ''
+                ];
+            }
+        }
+
+        return $experience;
+    }
+
+    protected function safeExtractEducation(string $text): array
+    {
+        $education = [];
+        $lines = explode("\n", $text);
+
+        foreach ($lines as $line) {
+            if (preg_match('/(University|College|Institute|School)/i', $line)) {
+                $education[] = [
+                    'degree' => '',
+                    'institution' => trim($line),
+                    'year' => ''
+                ];
+            }
+        }
+
+        return $education;
+    }
 }
